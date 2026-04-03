@@ -51,7 +51,7 @@ You'll need to register a user first (maybe an admin), then log in to get a toke
 
 ## A Few Notes
 
-- I used Node.js with Express for the server, lowdb for the database (it's just a JSON file), and libraries like Joi for validation and bcrypt for passwords.
+- I used Node.js with Express for the server, lowdb for the database (it's just a JSON file), and libraries like JOI for validation and bcrypt for passwords.
 - Roles are enforced strictly: viewers can't change anything, analysts can manage records, admins can do it all.
 - Data is stored in `data/finance.json` – it's not a full database, but it's fine for this.
 - If you want to add more features, like a frontend or better database, it should be easy to extend.
