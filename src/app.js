@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const { initDb } = require('./db');
@@ -11,16 +13,6 @@ const { authenticate } = require('./middlewares/auth');
 const app = express();
 app.use(bodyParser.json());
 
-(async () => {
-  try {
-    await initDb();
-    console.log('Database initialized');
-  } catch (err) {
-    console.error('Failed to initialize database:', err);
-    process.exit(1);
-  }
-})();
-
 app.get('/', (req, res) => {
   res.json({ message: 'Finance Dashboard API is running.' });
 });
@@ -32,7 +24,35 @@ app.use('/api/dashboard', authenticate, dashboardRoutes);
 
 app.use(handleErrors);
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
-});
+const DEFAULT_PORT = Number(process.env.PORT) || 4000;
+
+function startServer(port) {
+  const server = app.listen(port, () => {
+    console.log(`Server started on port ${port}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      const nextPort = port + 1;
+      console.warn(`Port ${port} is already in use. Retrying on port ${nextPort}...`);
+      startServer(nextPort);
+      return;
+    }
+
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
+
+async function bootstrap() {
+  try {
+    await initDb();
+    console.log('Database initialized');
+    startServer(DEFAULT_PORT);
+  } catch (err) {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  }
+}
+
+bootstrap();
