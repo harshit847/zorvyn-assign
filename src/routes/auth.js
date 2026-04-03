@@ -18,67 +18,43 @@ const loginSchema = Joi.object({
   password: Joi.string().required(),
 });
 
-router.post('/register', async (req, res, next) => {
-  try {
-    const value = await registerSchema.validateAsync(req.body);
-    const db = getDb();
-    await db.read();
+router.post('/register', (req, res, next) => {
+  const value = registerSchema.validate(req.body);
+  if (value.error) return res.status(400).json({ error: value.error.details[0].message });
 
-    const existing = db.data.users.find((u) => u.email === value.email);
-    if (existing) {
-      return res.status(409).json({ error: 'Email already exists' });
-    }
+  const db = getDb();
+  db.get('SELECT id FROM users WHERE email = ?', [value.value.email], (err, row) => {
+    if (err) return next(err);
+    if (row) return res.status(409).json({ error: 'Email already exists' });
 
-    const nextId = ++db.data.counters.userId;
-    const hashedPassword = bcrypt.hashSync(value.password, 10);
-    const user = {
-      id: nextId,
-      name: value.name,
-      email: value.email,
-      password: hashedPassword,
-      role: value.role,
-      created_at: new Date().toISOString(),
-    };
-
-    db.data.users.push(user);
-    await db.write();
-
-    const out = { id: user.id, name: user.name, email: user.email, role: user.role, created_at: user.created_at };
-    const token = generateToken(out);
-    return res.status(201).json({ user: out, token });
-  } catch (error) {
-    next(error);
-  }
+    const hashedPassword = bcrypt.hashSync(value.value.password, 10);
+    db.run('INSERT INTO users (name,email,password,role) VALUES (?,?,?,?)', [value.value.name, value.value.email, hashedPassword, value.value.role], function(err) {
+      if (err) return next(err);
+      db.get('SELECT id,name,email,role,created_at FROM users WHERE id = ?', [this.lastID], (err, user) => {
+        if (err) return next(err);
+        const token = generateToken(user);
+        return res.status(201).json({ user, token });
+      });
+    });
+  });
 });
 
-router.post('/login', async (req, res, next) => {
-  try {
-    const value = await loginSchema.validateAsync(req.body);
-    const db = getDb();
-    await db.read();
+router.post('/login', (req, res, next) => {
+  const value = loginSchema.validate(req.body);
+  if (value.error) return res.status(400).json({ error: value.error.details[0].message });
 
-    const user = db.data.users.find((u) => u.email === value.email);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+  const db = getDb();
+  db.get('SELECT id,name,email,password,role FROM users WHERE email = ?', [value.value.email], (err, user) => {
+    if (err) return next(err);
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const matched = bcrypt.compareSync(value.password, user.password);
-    if (!matched) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    const matched = bcrypt.compareSync(value.value.password, user.password);
+    if (!matched) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const payload = {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-    };
+    const payload = { id: user.id, email: user.email, role: user.role, name: user.name };
     const token = generateToken(payload);
-
     return res.json({ user: payload, token });
-  } catch (error) {
-    next(error);
-  }
+  });
 });
 
 module.exports = router;

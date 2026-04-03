@@ -1,7 +1,6 @@
 const express = require('express');
 const Joi = require('joi');
 const { getDb } = require('../db');
-const { requireRole } = require('../middlewares/rbac');
 
 const router = express.Router();
 
@@ -10,83 +9,76 @@ const updateSchema = Joi.object({
   role: Joi.string().valid('viewer', 'analyst', 'admin'),
 });
 
-router.get('/', requireRole('admin'), async (req, res, next) => {
-  try {
-    const db = getDb();
-    await db.read();
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-    const users = db.data.users.map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      created_at: u.created_at,
-    }));
+    if (!allowedRoles.includes(user.role)) {
+      return res.status(403).json({ error: 'Forbidden: insufficient role' });
+    }
 
+    next();
+  };
+}
+
+router.get('/', requireRole('admin'), (req, res, next) => {
+  const db = getDb();
+  db.all('SELECT id,name,email,role,created_at FROM users', [], (err, users) => {
+    if (err) return next(err);
     return res.json({ users });
-  } catch (error) {
-    next(error);
-  }
+  });
 });
 
-router.get('/:id', requireRole('admin'), async (req, res, next) => {
-  try {
-    const db = getDb();
-    await db.read();
+router.get('/:id', requireRole('admin'), (req, res, next) => {
+  const db = getDb();
+  db.get('SELECT id,name,email,role,created_at FROM users WHERE id = ?', [req.params.id], (err, user) => {
+    if (err) return next(err);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    return res.json({ user });
+  });
+});
 
-    const user = db.data.users.find((u) => u.id === Number(req.params.id));
+router.patch('/:id', requireRole('admin'), (req, res, next) => {
+  const value = updateSchema.validate(req.body);
+  if (value.error) return res.status(400).json({ error: value.error.details[0].message });
+
+  const db = getDb();
+  db.get('SELECT id FROM users WHERE id = ?', [req.params.id], (err, user) => {
+    if (err) return next(err);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    return res.json({ user: { id: user.id, name: user.name, email: user.email, role: user.role, created_at: user.created_at } });
-  } catch (error) {
-    next(error);
-  }
+    const updates = [];
+    const params = [];
+    if (value.value.name) {
+      updates.push('name = ?');
+      params.push(value.value.name);
+    }
+    if (value.value.role) {
+      updates.push('role = ?');
+      params.push(value.value.role);
+    }
+    params.push(req.params.id);
+
+    db.run(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params, function(err) {
+      if (err) return next(err);
+      db.get('SELECT id,name,email,role,created_at FROM users WHERE id = ?', [req.params.id], (err, updated) => {
+        if (err) return next(err);
+        return res.json({ user: updated });
+      });
+    });
+  });
 });
 
-router.patch('/:id', requireRole('admin'), async (req, res, next) => {
-  try {
-    const value = await updateSchema.validateAsync(req.body);
-    const db = getDb();
-    await db.read();
-
-    const userIndex = db.data.users.findIndex((u) => u.id === Number(req.params.id));
-    if (userIndex === -1) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    db.data.users[userIndex] = {
-      ...db.data.users[userIndex],
-      name: value.name ?? db.data.users[userIndex].name,
-      role: value.role ?? db.data.users[userIndex].role,
-    };
-
-    await db.write();
-
-    const updated = db.data.users[userIndex];
-    return res.json({ user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role, created_at: updated.created_at } });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.delete('/:id', requireRole('admin'), async (req, res, next) => {
-  try {
-    const db = getDb();
-    await db.read();
-
-    const userIndex = db.data.users.findIndex((u) => u.id === Number(req.params.id));
-    if (userIndex === -1) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    db.data.users.splice(userIndex, 1);
-    db.data.finance_records = db.data.finance_records.filter((r) => r.user_id !== Number(req.params.id));
-    await db.write();
-
+router.delete('/:id', requireRole('admin'), (req, res, next) => {
+  const db = getDb();
+  db.run('DELETE FROM users WHERE id = ?', [req.params.id], function(err) {
+    if (err) return next(err);
+    if (this.changes === 0) return res.status(404).json({ error: 'User not found' });
     return res.status(204).send();
-  } catch (error) {
-    next(error);
-  }
+  });
 });
 
 module.exports = router;

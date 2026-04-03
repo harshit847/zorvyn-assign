@@ -1,7 +1,6 @@
 const express = require('express');
 const Joi = require('joi');
 const { getDb } = require('../db');
-const { requireRole } = require('../middlewares/rbac');
 
 const router = express.Router();
 
@@ -13,123 +12,124 @@ const recordSchema = Joi.object({
   date: Joi.date().iso().required(),
 });
 
-const formatRecord = (record, users) => {
-  const author = users.find((u) => u.id === record.user_id);
-  return {
-    ...record,
-    author: author ? author.name : null,
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (!allowedRoles.includes(user.role)) {
+      return res.status(403).json({ error: 'Forbidden: insufficient role' });
+    }
+
+    next();
   };
-};
+}
 
-router.post('/', requireRole('analyst', 'admin'), async (req, res, next) => {
+router.post('/', requireRole('analyst', 'admin'), (req, res, next) => {
   try {
-    const value = await recordSchema.validateAsync(req.body);
+    const value = recordSchema.validateAsync(req.body);
     const db = getDb();
-    await db.read();
 
-    const nextId = ++db.data.counters.recordId;
-    const record = {
-      id: nextId,
-      user_id: req.user.id,
-      type: value.type,
-      amount: value.amount,
-      category: value.category,
-      description: value.description || '',
-      date: value.date,
-      created_at: new Date().toISOString(),
-    };
+    const inserted = db.prepare('INSERT INTO finance_records (user_id, type, amount, category, description, date) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(req.user.id, value.type, value.amount, value.category, value.description, value.date);
+    const record = db.prepare('SELECT fr.*, u.name as author FROM finance_records fr JOIN users u ON u.id = fr.user_id WHERE fr.id = ?').get(inserted.lastInsertRowid);
 
-    db.data.finance_records.push(record);
-    await db.write();
-
-    return res.status(201).json({ record: formatRecord(record, db.data.users) });
+    return res.status(201).json({ record });
   } catch (error) {
     next(error);
   }
 });
 
-router.get('/', requireRole('viewer', 'analyst', 'admin'), async (req, res, next) => {
+router.get('/', requireRole('viewer', 'analyst', 'admin'), (req, res, next) => {
   try {
     const db = getDb();
-    await db.read();
-
     const { type, category, fromDate, toDate, minAmount, maxAmount, page = 1, limit = 20 } = req.query;
-    let records = [...db.data.finance_records];
 
-    if (type) records = records.filter((r) => r.type === type);
-    if (category) records = records.filter((r) => r.category === category);
-    if (fromDate) records = records.filter((r) => new Date(r.date) >= new Date(fromDate));
-    if (toDate) records = records.filter((r) => new Date(r.date) <= new Date(toDate));
-    if (minAmount) records = records.filter((r) => r.amount >= Number(minAmount));
-    if (maxAmount) records = records.filter((r) => r.amount <= Number(maxAmount));
+    let query = 'SELECT fr.*, u.name as author FROM finance_records fr JOIN users u ON u.id = fr.user_id';
+    const conditions = [];
+    const params = [];
 
-    records.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const total = records.length;
-    const start = (Number(page) - 1) * Number(limit);
-    const paged = records.slice(start, start + Number(limit));
+    if (type) {
+      conditions.push('fr.type = ?');
+      params.push(type);
+    }
+    if (category) {
+      conditions.push('fr.category = ?');
+      params.push(category);
+    }
+    if (fromDate) {
+      conditions.push('fr.date >= ?');
+      params.push(fromDate);
+    }
+    if (toDate) {
+      conditions.push('fr.date <= ?');
+      params.push(toDate);
+    }
+    if (minAmount) {
+      conditions.push('fr.amount >= ?');
+      params.push(Number(minAmount));
+    }
+    if (maxAmount) {
+      conditions.push('fr.amount <= ?');
+      params.push(Number(maxAmount));
+    }
 
-    return res.json({
-      page: Number(page),
-      limit: Number(limit),
-      total,
-      records: paged.map((record) => formatRecord(record, db.data.users)),
-    });
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY fr.date DESC LIMIT ? OFFSET ?';
+    params.push(Number(limit));
+    params.push((Number(page) - 1) * Number(limit));
+
+    const records = db.prepare(query).all(...params);
+    const count = db.prepare('SELECT COUNT(1) as total FROM finance_records fr ' + (conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : ''))
+      .get(...params.slice(0, params.length - 2)).total;
+
+    return res.json({ page: Number(page), limit: Number(limit), total: count, records });
   } catch (error) {
     next(error);
   }
 });
 
-router.get('/:id', requireRole('viewer', 'analyst', 'admin'), async (req, res, next) => {
+router.get('/:id', requireRole('viewer', 'analyst', 'admin'), (req, res, next) => {
+  const db = getDb();
   try {
-    const db = getDb();
-    await db.read();
-
-    const record = db.data.finance_records.find((r) => r.id === Number(req.params.id));
+    const record = db.prepare('SELECT fr.*, u.name as author FROM finance_records fr JOIN users u ON u.id = fr.user_id WHERE fr.id = ?').get(req.params.id);
     if (!record) return res.status(404).json({ error: 'Record not found' });
-
-    return res.json({ record: formatRecord(record, db.data.users) });
+    return res.json({ record });
   } catch (error) {
     next(error);
   }
 });
 
-router.put('/:id', requireRole('analyst', 'admin'), async (req, res, next) => {
+router.put('/:id', requireRole('analyst', 'admin'), (req, res, next) => {
   try {
-    const value = await recordSchema.validateAsync(req.body);
+    const value = recordSchema.validateAsync(req.body);
     const db = getDb();
-    await db.read();
 
-    const index = db.data.finance_records.findIndex((r) => r.id === Number(req.params.id));
-    if (index === -1) return res.status(404).json({ error: 'Record not found' });
+    const existing = db.prepare('SELECT id FROM finance_records WHERE id = ?').get(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
 
-    db.data.finance_records[index] = {
-      ...db.data.finance_records[index],
-      type: value.type,
-      amount: value.amount,
-      category: value.category,
-      description: value.description || '',
-      date: value.date,
-    };
+    db.prepare('UPDATE finance_records SET type = ?, amount = ?, category = ?, description = ?, date = ? WHERE id = ?')
+      .run(value.type, value.amount, value.category, value.description, value.date, req.params.id);
 
-    await db.write();
-
-    return res.json({ record: formatRecord(db.data.finance_records[index], db.data.users) });
+    const record = db.prepare('SELECT fr.*, u.name as author FROM finance_records fr JOIN users u ON u.id = fr.user_id WHERE fr.id = ?').get(req.params.id);
+    return res.json({ record });
   } catch (error) {
     next(error);
   }
 });
 
-router.delete('/:id', requireRole('analyst', 'admin'), async (req, res, next) => {
+router.delete('/:id', requireRole('analyst', 'admin'), (req, res, next) => {
+  const db = getDb();
   try {
-    const db = getDb();
-    await db.read();
-
-    const index = db.data.finance_records.findIndex((r) => r.id === Number(req.params.id));
-    if (index === -1) return res.status(404).json({ error: 'Record not found' });
-
-    db.data.finance_records.splice(index, 1);
-    await db.write();
-
+    const info = db.prepare('DELETE FROM finance_records WHERE id = ?').run(req.params.id);
+    if (info.changes === 0) return res.status(404).json({ error: 'Record not found' });
     return res.status(204).send();
   } catch (error) {
     next(error);

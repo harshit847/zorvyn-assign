@@ -24,11 +24,11 @@ function authenticate(req, res, next) {
   }
 }
 
-async function getCurrentUser(req) {
+function getCurrentUser(req) {
   if (!req.user) return null;
   const db = getDb();
-  await db.read();
-  return db.data.users.find((u) => u.id === Number(req.user.id)) || null;
+  const user = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(req.user.id);
+  return user;
 }
 
 module.exports = {

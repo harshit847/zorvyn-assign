@@ -1,59 +1,60 @@
 const express = require('express');
 const { getDb } = require('../db');
-const { requireRole } = require('../middlewares/rbac');
 
 const router = express.Router();
 
-router.get('/summary', requireRole('viewer', 'analyst', 'admin'), async (req, res, next) => {
-  try {
-    const db = getDb();
-    await db.read();
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-    const incomeRecords = db.data.finance_records.filter((r) => r.type === 'income');
-    const expenseRecords = db.data.finance_records.filter((r) => r.type === 'expense');
-    const incomeSum = incomeRecords.reduce((acc, item) => acc + Number(item.amount), 0);
-    const expenseSum = expenseRecords.reduce((acc, item) => acc + Number(item.amount), 0);
+    if (!allowedRoles.includes(user.role)) {
+      return res.status(403).json({ error: 'Forbidden: insufficient role' });
+    }
+
+    next();
+  };
+}
+
+router.get('/summary', requireRole('viewer', 'analyst', 'admin'), (req, res, next) => {
+  const db = getDb();
+  try {
+    const incomeSum = db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM finance_records WHERE type='income'").get().total;
+    const expenseSum = db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM finance_records WHERE type='expense'").get().total;
+    const countIncome = db.prepare("SELECT COUNT(1) AS total FROM finance_records WHERE type='income'").get().total;
+    const countExpense = db.prepare("SELECT COUNT(1) AS total FROM finance_records WHERE type='expense'").get().total;
+
     const net = incomeSum - expenseSum;
 
     res.json({
       totalIncome: incomeSum,
       totalExpenses: expenseSum,
       netSavings: net,
-      numberOfIncomeRecords: incomeRecords.length,
-      numberOfExpenseRecords: expenseRecords.length,
+      numberOfIncomeRecords: countIncome,
+      numberOfExpenseRecords: countExpense,
     });
   } catch (error) {
     next(error);
   }
 });
 
-router.get('/trend', requireRole('viewer', 'analyst', 'admin'), async (req, res, next) => {
+router.get('/trend', requireRole('viewer', 'analyst', 'admin'), (req, res, next) => {
   const { period = 'month' } = req.query;
+  const db = getDb();
+
   try {
-    const db = getDb();
-    await db.read();
+    const bucket = period === 'year' ? "%Y" : "%Y-%m";
+    const incomeTrend = db.prepare(`
+      SELECT strftime('${bucket}', date) AS period, SUM(amount) AS value
+      FROM finance_records WHERE type='income' GROUP BY period ORDER BY period ASC
+    `).all();
 
-    const bucketFn = period === 'year'
-      ? (dateStr) => new Date(dateStr).getFullYear().toString()
-      : (dateStr) => {
-        const d = new Date(dateStr);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      };
-
-    const groupTrend = (type) => {
-      const filtered = db.data.finance_records.filter((r) => r.type === type);
-      const grouped = filtered.reduce((acc, item) => {
-        const bucket = bucketFn(item.date);
-        acc[bucket] = (acc[bucket] || 0) + Number(item.amount);
-        return acc;
-      }, {});
-      return Object.entries(grouped)
-        .map(([periodKey, value]) => ({ period: periodKey, value }))
-        .sort((a, b) => (a.period > b.period ? 1 : -1));
-    };
-
-    const incomeTrend = groupTrend('income');
-    const expenseTrend = groupTrend('expense');
+    const expenseTrend = db.prepare(`
+      SELECT strftime('${bucket}', date) AS period, SUM(amount) AS value
+      FROM finance_records WHERE type='expense' GROUP BY period ORDER BY period ASC
+    `).all();
 
     return res.json({ period, incomeTrend, expenseTrend });
   } catch (error) {

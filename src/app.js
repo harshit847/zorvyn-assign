@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const { initDb } = require('./db');
@@ -12,7 +11,15 @@ const { authenticate } = require('./middlewares/auth');
 const app = express();
 app.use(bodyParser.json());
 
-initDb();
+(async () => {
+  try {
+    await initDb();
+    console.log('Database initialized');
+  } catch (err) {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  }
+})();
 
 app.get('/', (req, res) => {
   res.json({ message: 'Finance Dashboard API is running.' });
